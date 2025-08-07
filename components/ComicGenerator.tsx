@@ -7,9 +7,10 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Zap, Sparkles, Download, Heart, Grid3X3, Palette } from "lucide-react";
+import { Zap, Sparkles, Download, Heart, Grid3X3, Palette, X } from "lucide-react";
 import { toast } from "sonner";
 import { ComicSkeleton } from "./ComicSkeleton";
+import { ProgressiveComicGrid } from "./ProgressiveComicGrid";
 
 interface ComicPanel {
   url: string;
@@ -33,44 +34,164 @@ export const ComicGenerator = () => {
   const [artStyle, setArtStyle] = useState("cartoon");
   const [tone, setTone] = useState("funny");
 
+  // Streaming state
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingPanels, setStreamingPanels] = useState<(ComicPanel | null)[]>([]);
+  const [panelStatuses, setPanelStatuses] = useState<("pending" | "generating" | "complete" | "error")[]>([]);
+  const [currentPanelIndex, setCurrentPanelIndex] = useState(-1);
+  const [generationStep, setGenerationStep] = useState("");
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
+
   const generateComic = async () => {
     if (!prompt.trim()) {
       toast.error("Please enter a description for your comic!");
       return;
     }
 
-    setIsGenerating(true);
+    // Reset streaming state
+    setIsStreaming(true);
+    setIsGenerating(false);
+    setCurrentComic(null);
+    const [rows, cols] = gridSize.split("x").map(Number);
+    const panelCount = rows * cols;
+
+    setStreamingPanels(Array(panelCount).fill(null));
+    setPanelStatuses(Array(panelCount).fill("pending"));
+    setCurrentPanelIndex(-1);
+    setGenerationStep("Starting...");
+
+    // Create abort controller for cleanup
+    const controller = new AbortController();
+    setAbortController(controller);
+
     try {
-      const response = await fetch("/api/generate-comic", {
+      const response = await fetch("/api/generate-comic-stream", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ prompt, gridSize, artStyle, tone }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API responded with status ${response.status}: ${errorText}`);
+        throw new Error(`Stream API responded with status ${response.status}`);
       }
 
-      const result = await response.json();
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("No stream reader available");
+      }
 
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const content = line.substring(6); // Remove 'data: '
+              try {
+                const data = JSON.parse(content);
+                await handleStreamEvent(data);
+              } catch (error) {
+                console.error("Error parsing stream data:", error);
+              }
+            }
+          }
+        }
+      } catch (streamError) {
+        console.error("Stream reading error:", streamError);
+        // Don't throw here, let the main catch handle it
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch (error) {
+          console.log("Reader already released");
+        }
+      }
+    } catch (error) {
+      console.error("Error in streaming comic generation:", error);
+      if (error instanceof Error && error.name === "AbortError") {
+        toast.info("Comic generation cancelled");
+      } else {
+        toast.error("Error generating comic");
+      }
+      setIsStreaming(false);
+    } finally {
+      setAbortController(null);
+    }
+  };
+
+  const handleStreamEvent = async (data: any) => {
+    // Determine event type based on data structure
+    if (data.totalPanels) {
+      // Start event
+      setGenerationStep(data.message);
+      toast.info(`Starting ${data.gridSize} comic generation...`);
+    } else if (data.step && !data.panelIndex && data.panelIndex !== 0) {
+      // Progress event
+      setGenerationStep(data.message);
+    } else if (data.panelIndex !== undefined && data.panel) {
+      // Panel complete event
+      setStreamingPanels(prev => {
+        const newPanels = [...prev];
+        newPanels[data.panelIndex] = data.panel;
+        return newPanels;
+      });
+      setPanelStatuses(prev => {
+        const newStatuses = [...prev];
+        newStatuses[data.panelIndex] = "complete";
+        return newStatuses;
+      });
+      toast.success(data.message);
+    } else if (data.panelIndex !== undefined && !data.panel) {
+      // Panel start event
+      setCurrentPanelIndex(data.panelIndex);
+      setGenerationStep(data.message);
+      setPanelStatuses(prev => {
+        const newStatuses = [...prev];
+        newStatuses[data.panelIndex] = "generating";
+        return newStatuses;
+      });
+    } else if (data.panels) {
+      // Complete event
+      setIsStreaming(false);
+      setCurrentPanelIndex(-1);
       const comic: Comic = {
         id: Date.now().toString(),
         prompt,
-        panels: result.panels,
-        gridLayout: result.gridLayout,
+        panels: data.panels,
+        gridLayout: data.gridLayout,
         createdAt: new Date(),
       };
-
       setCurrentComic(comic);
-      toast.success(`${gridSize} comic generated successfully!`);
-    } catch (error) {
-      console.error("Error generating comic:", error);
-      toast.error("Error generating comic");
-    } finally {
-      setIsGenerating(false);
+      setGenerationStep("Completed!");
+      toast.success(data.message);
+    } else if (data.error) {
+      // Error event
+      setIsStreaming(false);
+      setCurrentPanelIndex(-1);
+      setGenerationStep("Error occurred");
+      toast.error(data.message);
+    } else {
+      console.log("Unknown stream event:", data);
+    }
+  };
+
+  const cancelGeneration = () => {
+    if (abortController) {
+      abortController.abort();
+      setIsStreaming(false);
+      setAbortController(null);
+      toast.info("Comic generation cancelled");
     }
   };
 
@@ -134,28 +255,45 @@ export const ComicGenerator = () => {
                   onChange={e => setPrompt(e.target.value)}
                   placeholder="e.g. 'a programmer who hasn't slept for 48h' or 'a cat trying to use a computer'"
                   className="text-lg p-4 border-3 border-primary/30 rounded-xl"
-                  onKeyPress={e => e.key === "Enter" && generateComic()}
+                  onKeyPress={e => e.key === "Enter" && !isStreaming && !isGenerating && generateComic()}
                 />
               </div>
-              <Button
-                onClick={generateComic}
-                disabled={isGenerating}
-                variant="default"
-                size="lg"
-                className="bg-gradient-comic text-primary-foreground font-bold text-lg px-8 py-4 rounded-xl shadow-pop hover:scale-105 transition-all duration-200 border-3 border-accent/50"
-              >
-                {isGenerating ? (
-                  <>
-                    <Sparkles className="animate-spin mr-2" />
-                    Generating...
-                  </>
-                ) : (
-                  <>
-                    <Zap className="mr-2" />
-                    Create {gridSize} Comic!
-                  </>
+              <div className="flex gap-2">
+                <Button
+                  onClick={generateComic}
+                  disabled={isGenerating || isStreaming}
+                  variant="default"
+                  size="lg"
+                  className="bg-gradient-comic text-primary-foreground font-bold text-lg px-8 py-4 rounded-xl shadow-pop hover:scale-105 transition-all duration-200 border-3 border-accent/50"
+                >
+                  {isStreaming ? (
+                    <>
+                      <Sparkles className="animate-spin mr-2" />
+                      {generationStep}
+                    </>
+                  ) : isGenerating ? (
+                    <>
+                      <Sparkles className="animate-spin mr-2" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="mr-2" />
+                      Create {gridSize} Comic!
+                    </>
+                  )}
+                </Button>
+                {isStreaming && (
+                  <Button
+                    onClick={cancelGeneration}
+                    variant="destructive"
+                    size="lg"
+                    className="font-bold text-lg px-4 py-4 rounded-xl shadow-pop hover:scale-105 transition-all duration-200"
+                  >
+                    <X className="w-5 h-5" />
+                  </Button>
                 )}
-              </Button>
+              </div>
             </div>
 
             {/* Advanced Controls */}
@@ -254,8 +392,18 @@ export const ComicGenerator = () => {
           </div>
         </Card>
 
-        {/* Loading Skeleton */}
-        {isGenerating && <ComicSkeleton gridSize={gridSize} />}
+        {/* Progressive Generation */}
+        {isStreaming && (
+          <ProgressiveComicGrid
+            gridSize={gridSize}
+            panels={streamingPanels}
+            panelStatuses={panelStatuses}
+            currentPanel={currentPanelIndex}
+          />
+        )}
+
+        {/* Loading Skeleton for fallback */}
+        {isGenerating && !isStreaming && <ComicSkeleton gridSize={gridSize} />}
 
         {/* Current Comic */}
         {currentComic && (

@@ -33,15 +33,19 @@ REPLICATE_API_TOKEN=your_replicate_api_token_here
 1. **Character Design**: GPT-4o-mini creates detailed character descriptions
 2. **Story Generation**: Complete narrative story is created first
 3. **Panel Breakdown**: Story is divided into individual panel descriptions
-4. **Hybrid Image Generation**:
+4. **Real-time Streaming**: Server-Sent Events (SSE) stream progress to client
+5. **Progressive Display**: Grid shows skeleton panels that fill with real images
+6. **Hybrid Image Generation**:
    - Panel 1: DALL-E 3 generates the base panel
    - Panel 2-N: Flux uses previous panel + new prompt for consistency
 
 ### 💡 **Benefits**
 
+- **Real-time Progress**: See panels generate one by one in real-time
 - **Perfect Character Consistency**: Each panel references the previous one
 - **High-Quality Output**: DALL-E 3 quality for initial panel
 - **Style Maintenance**: Flux maintains visual style throughout
+- **Progressive UI**: Visual feedback with skeleton → loading → complete states
 - **Fallback System**: DALL-E 3 fallback if Flux fails
 
 ### 🎨 **Supported Features**
