@@ -360,7 +360,14 @@ CRITICAL REQUIREMENTS:
 
                     console.log(`Successfully generated with ${fluxModel} fallback`);
                   } catch (fluxDevError) {
-                    console.log(`Flux-dev also failed, trying flux-schnell:`, fluxDevError.message);
+                    const errorMessage =
+                      fluxDevError instanceof Error
+                        ? fluxDevError.message
+                        : typeof fluxDevError === "object" && fluxDevError !== null && "message" in fluxDevError
+                        ? (fluxDevError as any).message
+                        : String(fluxDevError);
+
+                    console.log(`Flux-dev also failed, trying flux-schnell:`, errorMessage);
 
                     // Third attempt: Try flux-schnell (faster, simpler model)
                     fluxModel = "black-forest-labs/flux-schnell";

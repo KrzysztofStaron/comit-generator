@@ -1,5 +1,5 @@
-import { ComicGenerator } from "@/components/ComicGenerator";
+import { AppTabs } from "@/components/AppTabs";
 
 export default function Home() {
-  return <ComicGenerator />;
+  return <AppTabs />;
 }
