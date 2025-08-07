@@ -1,0 +1,23 @@
+{
+  "task": "Your task is to generate a story for a comic with 1x2 panels, make the descriptions long and accurate",
+  "ouput": [
+    type: Array,
+    characters: string[],
+    format: Array<{scenery, characters, dialogue}>
+  ],
+
+  "example_output: {
+    panels: [
+      { 
+        scenery: "a city, with huge skyscrapers [...]",
+        characters: "a superman spotting a vilain:,
+        "dialogue": "Superman: I'm gonna get you"
+      },
+      { 
+        scenery: "buttom of a city, with huge skyscrapers [...]",
+        characters: "a superman next to a vilain:,
+        "dialogue": "Superman: You're done, Vilain: I want you to try"
+      },
+    ]
+  }
+}
