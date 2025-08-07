@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import Replicate from "replicate";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+});
+
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN,
 });
 
 export async function POST(request: NextRequest) {
@@ -14,8 +19,14 @@ export async function POST(request: NextRequest) {
     }
 
     const openaiApiKey = process.env.OPENAI_API_KEY;
+    const replicateApiToken = process.env.REPLICATE_API_TOKEN;
+
     if (!openaiApiKey) {
       return NextResponse.json({ error: "OpenAI API key not configured" }, { status: 500 });
+    }
+
+    if (!replicateApiToken) {
+      return NextResponse.json({ error: "Replicate API token not configured" }, { status: 500 });
     }
 
     // Calculate panel count based on grid size
@@ -145,7 +156,7 @@ CRITICAL RULES:
     let panelDescriptions: string[];
     try {
       // Try to parse as JSON array first
-      const arrayMatch = comicDescriptionText.match(/\[.*\]/s);
+      const arrayMatch = comicDescriptionText.match(/\[[\s\S]*\]/);
       if (arrayMatch) {
         panelDescriptions = JSON.parse(arrayMatch[0]);
       } else {
@@ -167,42 +178,43 @@ CRITICAL RULES:
         });
     }
 
-    // Step 4: Generate images using DALL-E with character consistency and retry logic
-    const imagePromises = panelDescriptions.map(async (panelDesc, index) => {
-      // Create character consistency prompt
-      const characterPrompt = characters.map((char: any) => `${char.name}: ${char.description}`).join(". ");
+    // Step 4: Generate images using hybrid approach - DALL-E 3 for first panel, Flux for subsequent panels
+    const panels = [];
+    let previousPanelUrl = "";
 
-      // Create style-specific prompt
-      let stylePrompt = "";
+    // Helper function to create style-specific prompt
+    const getStylePrompt = (artStyle: string) => {
       switch (artStyle) {
         case "manga":
-          stylePrompt = "Manga-style comic panel with clean line art, dramatic expressions, and manga visual effects";
-          break;
+          return "Manga-style comic panel with clean line art, dramatic expressions, and manga visual effects";
         case "superhero":
-          stylePrompt =
-            "Superhero comic panel with bold lines, dynamic poses, and vibrant colors in classic comic book style";
-          break;
+          return "Superhero comic panel with bold lines, dynamic poses, and vibrant colors in classic comic book style";
         case "cyberpunk":
-          stylePrompt = "Cyberpunk comic panel with neon colors, futuristic technology, and dark urban atmosphere";
-          break;
+          return "Cyberpunk comic panel with neon colors, futuristic technology, and dark urban atmosphere";
         case "watercolor":
-          stylePrompt = "Watercolor comic panel with soft, flowing colors and artistic brush strokes";
-          break;
+          return "Watercolor comic panel with soft, flowing colors and artistic brush strokes";
         case "noir":
-          stylePrompt = "Film noir comic panel with high contrast, dramatic shadows, and monochromatic tones";
-          break;
+          return "Film noir comic panel with high contrast, dramatic shadows, and monochromatic tones";
         case "pixelart":
-          stylePrompt = "Pixel art comic panel with retro 8-bit or 16-bit video game aesthetics";
-          break;
+          return "Pixel art comic panel with retro 8-bit or 16-bit video game aesthetics";
         case "disney":
-          stylePrompt = "Disney animation style comic panel with expressive characters and bright, cheerful colors";
-          break;
+          return "Disney animation style comic panel with expressive characters and bright, cheerful colors";
         default: // cartoon
-          stylePrompt = "Cartoon comic panel with bright colors, expressive characters, and clean line art";
+          return "Cartoon comic panel with bright colors, expressive characters, and clean line art";
       }
+    };
 
-      // Enhanced prompt with character consistency and single panel specification
-      const fullPrompt = `SINGLE COMIC PANEL ONLY: ${stylePrompt}: ${panelDesc}. 
+    const characterPrompt = characters.map((char: any) => `${char.name}: ${char.description}`).join(". ");
+    const stylePrompt = getStylePrompt(artStyle);
+
+    for (let i = 0; i < panelDescriptions.length; i++) {
+      const panelDesc = panelDescriptions[i];
+      console.log(`Generating panel ${i + 1}/${panelDescriptions.length}`);
+
+      try {
+        if (i === 0) {
+          // First panel: Use DALL-E 3
+          const fullPrompt = `SINGLE COMIC PANEL ONLY: ${stylePrompt}: ${panelDesc}. 
 
 CHARACTER CONSISTENCY: ${characterPrompt}. 
 
@@ -214,12 +226,6 @@ CRITICAL REQUIREMENTS:
 - The overall mood should be ${tone}
 - Professional comic book quality single panel`;
 
-      // Retry logic for image generation
-      const maxRetries = 3;
-      let lastError;
-
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
           const imageResponse = await openai.images.generate({
             model: "dall-e-3",
             prompt: fullPrompt,
@@ -229,26 +235,95 @@ CRITICAL REQUIREMENTS:
             style: "vivid",
           });
 
-          return {
-            url: imageResponse.data[0].url,
-            description: panelDesc,
-          };
-        } catch (error) {
-          lastError = error;
-          console.error(`Attempt ${attempt} failed for panel ${index + 1}:`, error);
-
-          if (attempt < maxRetries) {
-            // Wait before retrying (exponential backoff)
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          if (!imageResponse.data || !imageResponse.data[0] || !imageResponse.data[0].url) {
+            throw new Error("DALL-E 3 image generation failed: No image URL returned.");
           }
+
+          const panelUrl = imageResponse.data[0].url;
+          panels.push({
+            url: panelUrl,
+            description: panelDesc,
+          });
+          previousPanelUrl = panelUrl;
+        } else {
+          // Subsequent panels: Use Replicate Flux with previous panel as context
+          const fluxPrompt = `${stylePrompt}: ${panelDesc}. 
+
+CHARACTER CONSISTENCY: Maintain the EXACT same character appearance from the previous panel: ${characterPrompt}. 
+
+CRITICAL REQUIREMENTS:
+- This is ONE SINGLE comic panel, not multiple panels
+- Use the previous panel as reference for character consistency
+- Same hair color, same clothing, same facial features, same body type as in the reference image
+- The overall mood should be ${tone}
+- Professional comic book quality single panel`;
+
+          const output = await replicate.run("black-forest-labs/flux-kontext-max", {
+            input: {
+              prompt: fluxPrompt,
+              input_image: previousPanelUrl,
+              output_format: "jpg",
+            },
+          });
+
+          // The output should be a URL or file-like object
+          let panelUrl;
+          if (typeof output === "string") {
+            panelUrl = output;
+          } else if (output && typeof output === "object" && "url" in output) {
+            panelUrl = (output as any).url();
+          } else if (Array.isArray(output) && output.length > 0) {
+            panelUrl = output[0];
+          } else {
+            throw new Error("Flux image generation failed: Unexpected output format.");
+          }
+
+          panels.push({
+            url: panelUrl,
+            description: panelDesc,
+          });
+          previousPanelUrl = panelUrl;
+        }
+      } catch (error) {
+        console.error(`Error generating panel ${i + 1}:`, error);
+
+        // Fallback: Use DALL-E 3 if Flux fails
+        try {
+          const fallbackPrompt = `SINGLE COMIC PANEL ONLY: ${stylePrompt}: ${panelDesc}. 
+
+CHARACTER CONSISTENCY: ${characterPrompt}. 
+
+CRITICAL REQUIREMENTS:
+- This is ONE SINGLE comic panel, not multiple panels
+- Maintain exact same character appearance as described
+- The overall mood should be ${tone}
+- Professional comic book quality single panel`;
+
+          const fallbackResponse = await openai.images.generate({
+            model: "dall-e-3",
+            prompt: fallbackPrompt,
+            n: 1,
+            size: "1024x1024",
+            quality: "standard",
+            style: "vivid",
+          });
+
+          if (!fallbackResponse.data || !fallbackResponse.data[0] || !fallbackResponse.data[0].url) {
+            throw new Error("Fallback DALL-E 3 image generation failed: No image URL returned.");
+          }
+
+          const panelUrl = fallbackResponse.data[0].url;
+          panels.push({
+            url: panelUrl,
+            description: panelDesc,
+          });
+          previousPanelUrl = panelUrl;
+        } catch (fallbackError) {
+          console.error(`Fallback generation failed for panel ${i + 1}:`, fallbackError);
+          throw new Error(`Failed to generate panel ${i + 1}`);
         }
       }
-
-      // If all retries failed, throw the last error
-      throw lastError;
-    });
-
-    const panels = await Promise.all(imagePromises);
+    }
 
     return NextResponse.json({
       panels: panels,
